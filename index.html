@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GMT Flute Configurator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #000; color: #fff; font-family: sans-serif; }
+        .key-btn { transition: all 0.1s; cursor: pointer; }
+        .key-btn.active { background: #f59e0b !important; transform: scale(0.95); }
+    </style>
+</head>
+<body class="p-4">
+    <div class="max-w-4xl mx-auto bg-gray-900 p-6 rounded-xl border border-gray-700">
+        <h1 class="text-2xl font-bold mb-6">GMT Flute Configurator</h1>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm text-gray-400">Base Note Key</label>
+                    <select id="baseNoteSelect" class="w-full p-2 bg-gray-800 rounded text-white border border-gray-600 mb-2">
+                        <option value="146.83">D3</option>
+                        <option value="164.81">E3</option>
+                        <option value="196.00">G3</option>
+                        <option value="220.00">A3</option>
+                        <option value="261.63">C4</option>
+                        <option value="293.66">D4</option>
+                        <option value="329.63">E4</option>
+                        <option value="392.00">G4</option>
+                        <option value="440.00">A4</option>
+                        <option value="523.25" selected>C5</option>
+                        <option value="custom">Custom Frequency...</option>
+                    </select>
+                    <input type="number" id="customFreq" value="440" class="hidden w-full p-2 bg-gray-800 rounded text-white border border-gray-600">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400">Intervals (e.g. 1-2-2-1-2-2-2)</label>
+                    <input type="text" id="scalePattern" value="1-2-2-1-2-2-2" class="w-full p-2 bg-gray-800 rounded text-white border border-gray-600">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400">Overlay Waveform</label>
+                    <select id="waveType" class="w-full p-2 bg-gray-800 rounded text-white border border-gray-600">
+                        <option value="none">None</option>
+                        <option value="square">Square</option>
+                        <option value="sawtooth">Sawtooth</option>
+                        <option value="triangle">Triangle</option>
+                        <option value="detunedSine">Detuned Sine</option>
+                        <option value="fmSine">FM Sine</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="flex items-center text-sm text-gray-400 gap-2">
+                        <input type="checkbox" id="superpose" checked> Enable Superposition
+                    </label>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400">Volume</label>
+                    <input type="range" id="vol" min="0" max="1" step="0.05" value="0.3" class="w-full">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400">Reverb Mix</label>
+                    <input type="range" id="reverbMix" min="0" max="1" step="0.05" value="0.5" class="w-full">
+                </div>
+                <button id="regen" class="w-full bg-blue-600 hover:bg-blue-700 p-2 rounded font-bold">Apply Configuration</button>
+            </div>
+            <canvas id="scope" class="w-full h-64 bg-black rounded border border-gray-700"></canvas>
+        </div>
+
+        <div id="keyboard" class="mt-8 flex flex-wrap gap-2 justify-center"></div>
+    </div>
+
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const masterGain = audioCtx.createGain();
+        const dryGain = audioCtx.createGain();
+        const wetGain = audioCtx.createGain();
+        
+        masterGain.connect(audioCtx.destination);
+        dryGain.connect(masterGain);
+        wetGain.connect(masterGain);
+
+        const analyser = audioCtx.createAnalyser();
+        masterGain.connect(analyser);
+        analyser.fftSize = 2048;
+
+        const impulse = audioCtx.createBuffer(2, audioCtx.sampleRate * 2.0, audioCtx.sampleRate);
+        for (let channel = 0; channel < 2; channel++) {
+            const data = impulse.getChannelData(channel);
+            for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3);
+        }
+        const reverbNode = audioCtx.createConvolver();
+        reverbNode.buffer = impulse;
+        reverbNode.connect(wetGain);
+
+        const keySequence = ['w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
+        let activeNotes = {};
+
+        document.getElementById('baseNoteSelect').onchange = (e) => {
+            document.getElementById('customFreq').classList.toggle('hidden', e.target.value !== 'custom');
+        };
+
+        function playTone(freq, el, key) {
+            // Sanity check for frequency
+            const safeFreq = (typeof freq === 'number' && isFinite(freq) && freq > 0) ? freq : 440;
+            const now = audioCtx.currentTime;
+            const osc1 = audioCtx.createOscillator();
+            const env = audioCtx.createGain();
+            
+            masterGain.gain.value = parseFloat(document.getElementById('vol').value) || 0.3;
+            const mix = parseFloat(document.getElementById('reverbMix').value) || 0.5;
+            dryGain.gain.value = 1 - mix;
+            wetGain.gain.value = mix;
+            
+            osc1.type = 'sine'; osc1.frequency.value = safeFreq;
+            
+            env.gain.setValueAtTime(0, now);
+            env.gain.linearRampToValueAtTime(0.5, now + 0.08);
+            env.gain.exponentialRampToValueAtTime(0.3, now + 0.2);
+            
+            osc1.connect(env);
+            const nodes = [osc1];
+            
+            const overlayType = document.getElementById('waveType').value;
+            const superpose = document.getElementById('superpose').checked;
+            
+            if (superpose && overlayType !== 'none') {
+                const osc2 = audioCtx.createOscillator();
+                const modulator = audioCtx.createOscillator();
+                const modGain = audioCtx.createGain();
+                
+                if (overlayType === 'fmSine') {
+                    modulator.frequency.value = safeFreq * 1.5;
+                    modGain.gain.value = safeFreq * 2;
+                    modulator.connect(modGain);
+                    modGain.connect(osc1.frequency);
+                    modulator.start();
+                    osc2.start();
+                    nodes.push(osc2, modulator, modGain);
+                } else if (overlayType === 'detunedSine') {
+                    osc2.type = 'sine';
+                    osc2.frequency.value = safeFreq * 1.01;
+                    osc2.connect(env);
+                    osc2.start();
+                    nodes.push(osc2);
+                } else {
+                    osc2.type = overlayType;
+                    osc2.frequency.value = safeFreq;
+                    osc2.connect(env);
+                    osc2.start();
+                    nodes.push(osc2);
+                }
+            }
+            
+            env.connect(dryGain);
+            env.connect(reverbNode);
+            
+            osc1.start();
+            if(el) el.classList.add('active');
+            return { nodes, env, el };
+        }
+
+        function getBaseFreq() {
+            const select = document.getElementById('baseNoteSelect');
+            const val = select.value === 'custom' ? parseFloat(document.getElementById('customFreq').value) : parseFloat(select.value);
+            return (isFinite(val) && val > 0) ? val : 440;
+        }
+
+        function generateKeyboard() {
+            const container = document.getElementById('keyboard');
+            container.innerHTML = '';
+            const base = getBaseFreq();
+            const patternInput = document.getElementById('scalePattern').value;
+            const pattern = patternInput.split('-').map(Number);
+            const notes = [base];
+            pattern.forEach(step => {
+                if (isFinite(step)) notes.push(notes[notes.length - 1] * Math.pow(2, step/12));
+            });
+            
+            notes.forEach((freq, i) => {
+                const btn = document.createElement('button');
+                btn.className = 'key-btn bg-indigo-600 p-4 rounded w-24 text-center';
+                const keyLabel = keySequence[i] || '-';
+                btn.innerHTML = `<div class="font-bold">${keyLabel.toUpperCase()}</div><div class="text-[10px]">${Math.round(freq)}Hz</div>`;
+                btn.onmousedown = () => { if(!activeNotes[keyLabel]) activeNotes[keyLabel] = playTone(freq, btn, keyLabel); };
+                btn.onmouseup = () => stopNote(keyLabel);
+                btn.onmouseleave = () => stopNote(keyLabel);
+                container.appendChild(btn);
+            });
+        }
+
+        function stopNote(key) {
+            if(!activeNotes[key]) return;
+            const { nodes, env, el } = activeNotes[key];
+            const now = audioCtx.currentTime;
+            env.gain.cancelScheduledValues(now);
+            env.gain.setValueAtTime(env.gain.value, now);
+            env.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+            nodes.forEach(n => {
+                if (n.stop) n.stop(now + 0.2);
+            });
+            if(el) el.classList.remove('active');
+            delete activeNotes[key];
+        }
+
+        window.onkeydown = (e) => { 
+            const key = e.key.toLowerCase();
+            const idx = keySequence.indexOf(key);
+            if(idx !== -1 && !activeNotes[key]) {
+                const base = getBaseFreq();
+                const pattern = document.getElementById('scalePattern').value.split('-').map(Number);
+                let f = base;
+                for(let j=0; j<idx; j++) if(isFinite(pattern[j])) f *= Math.pow(2, pattern[j]/12);
+                const btn = document.querySelectorAll('.key-btn')[idx];
+                activeNotes[key] = playTone(f, btn, key);
+            }
+        };
+        
+        window.onkeyup = (e) => stopNote(e.key.toLowerCase());
+
+        document.getElementById('regen').onclick = generateKeyboard;
+        generateKeyboard();
+        
+        function draw() {
+            requestAnimationFrame(draw);
+            const buffer = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteTimeDomainData(buffer);
+            const ctx = document.getElementById('scope').getContext('2d');
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0,0,800,256);
+            ctx.strokeStyle = '#00ff00';
+            ctx.beginPath();
+            for(let i=0; i<buffer.length; i++) ctx.lineTo((i / buffer.length) * 800, (buffer[i] / 255) * 256);
+            ctx.stroke();
+        }
+        draw();
+    </script>
+</body>
+</html>
